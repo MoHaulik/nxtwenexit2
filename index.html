@@ -20,6 +20,9 @@
   <button class="exit-ar" id="exit-ar">×</button>
   <div id="status"></div>
   
+  <!-- Audio element for clap sound effect -->
+  <audio id="clap-sound" src="sound1.wav" preload="auto"></audio>
+  
   <!-- Video elements for content - removed 'muted' attribute to enable audio -->
   <video id="video-1" loop playsinline crossorigin="anonymous"></video>
   <video id="video-2" loop playsinline crossorigin="anonymous"></video>
@@ -177,6 +180,10 @@
         updateStatus('WebXR not supported in this browser.');
         return;
       }
+      
+      // Preload the clap sound
+      const clapSound = document.getElementById('clap-sound');
+      clapSound.load();
       
       // Unlock videos for autoplay (user gesture)
       document.querySelectorAll('video').forEach(video => {
@@ -377,6 +384,11 @@
               // Store the redirection URL before exiting
               currentVideoForRedirect = videoPanel.getCurrentVideoLink();
             }
+            
+            // Play the clap sound
+            const clapSound = document.getElementById('clap-sound');
+            clapSound.volume = 0.7;
+            clapSound.play().catch(err => console.error("Error playing clap sound:", err));
             
             // Play "clap to camera" transition animation
             videoPanel.playClapExitAnimation(() => {
@@ -593,64 +605,69 @@
         this.panel.add(particles);
       }
       
-      // Enhanced particle effect with more particles and better edge visibility
+      // Enhanced particle effect with improved border positioning and animation
       createParticleEffect() {
         // Create a particle system for shiny effect behind the panel
-        const particleCount = 200; // Increased from 100 to 200 particles
+        const particleCount = 250; // Increased particle count for better effect
         const particleGeometry = new THREE.BufferGeometry();
         const particlePositions = new Float32Array(particleCount * 3);
         const particleSizes = new Float32Array(particleCount);
         
-        // Position particles with more emphasis on the edges
+        // Position particles with emphasis on following the border of the panel
+        const panelWidth = 0.7;
+        const panelHeight = 0.5;
+        const borderWidth = 0.08; // Width of the border region
+        
         for (let i = 0; i < particleCount; i++) {
-          // Spread across panel width/height but positioned to favor the edges
-          const panelWidth = 0.7;
-          const panelHeight = 0.5;
-          const spread = 0.15; // Increased from 0.05 to 0.15 for better edge visibility
+          let x, y, z;
           
-          let x, y;
-          
-          // Use a distribution that favors edges (40% chance of being at an edge)
-          if (Math.random() < 0.4) {
-            // Create particles at the edges
-            if (Math.random() < 0.5) {
-              // Horizontal edges (top/bottom)
-              x = (Math.random() - 0.5) * (panelWidth + spread);
-              y = (Math.random() < 0.5 ? -0.5 : 0.5) * (panelHeight + Math.random() * spread * 0.5);
+          // Distribute particles - 80% along the border, 20% scattered within panel area
+          if (Math.random() < 0.8) {
+            // Create particles along the border of the panel
+            const angle = Math.random() * Math.PI * 2; // Position around the perimeter
+            const borderOffset = borderWidth * (0.5 + Math.random() * 0.5); // Vary the distance from edge
+            
+            // Calculate position based on angle - creates an oval shape following panel dimensions
+            const t = angle / (Math.PI * 2);
+            
+            if (angle < Math.PI * 0.5 || angle > Math.PI * 1.5) {
+              // Top or bottom edge
+              x = Math.cos(angle) * (panelWidth * 0.5 - borderOffset * Math.random());
+              y = Math.sign(Math.sin(angle)) * (panelHeight * 0.5 - borderOffset * 0.25);
             } else {
-              // Vertical edges (left/right)
-              x = (Math.random() < 0.5 ? -0.5 : 0.5) * (panelWidth + Math.random() * spread * 0.5);
-              y = (Math.random() - 0.5) * (panelHeight + spread);
+              // Left or right edge
+              x = Math.sign(Math.cos(angle)) * (panelWidth * 0.5 - borderOffset * 0.25);
+              y = Math.sin(angle) * (panelHeight * 0.5 - borderOffset * Math.random());
             }
           } else {
-            // Create particles distributed across the panel area
-            // Use a cubic function to push more particles toward the edges
-            const t = Math.random() * 2 - 1; // Range -1 to 1
-            const cubicValue = Math.pow(t, 3); // Cubic distribution
+            // Scattered particles within the panel area, but not too far from border
+            const angleToCenter = Math.random() * Math.PI * 2;
+            const distanceFromCenter = Math.random() * 0.3; // Keep within panel bounds
             
-            x = cubicValue * 0.5 * (panelWidth + spread);
-            y = (Math.random() * 2 - 1) * 0.5 * (panelHeight + spread);
-            
-            // Randomly swap x and y in some cases for better distribution
-            if (Math.random() < 0.5) {
-              const temp = x;
-              x = y;
-              y = temp;
-            }
+            x = Math.cos(angleToCenter) * distanceFromCenter * panelWidth * 0.5;
+            y = Math.sin(angleToCenter) * distanceFromCenter * panelHeight * 0.5;
           }
+          
+          // Vary z-depth slightly for parallax effect
+          z = -0.02 - Math.random() * 0.025; 
           
           particlePositions[i * 3] = x;
           particlePositions[i * 3 + 1] = y;
-          particlePositions[i * 3 + 2] = -0.03 - Math.random() * 0.02; // Varied depth behind panel
+          particlePositions[i * 3 + 2] = z;
           
-          // Random sizes with larger variation
-          particleSizes[i] = Math.random() * 0.015 + 0.002;
+          // Random sizes with variation based on position
+          // Larger particles near the edges
+          const distFromCenter = Math.sqrt(x*x + y*y);
+          const maxDist = Math.sqrt((panelWidth*0.5)*(panelWidth*0.5) + (panelHeight*0.5)*(panelHeight*0.5));
+          const sizeFactor = 0.5 + 0.5 * (distFromCenter / maxDist);
+          
+          particleSizes[i] = (0.005 + Math.random() * 0.012) * sizeFactor;
         }
         
         particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
         particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
         
-        // Create shader material for particles
+        // Create shader material for particles with improved animation
         const particleMaterial = new THREE.ShaderMaterial({
           uniforms: {
             time: { value: 0 },
@@ -664,17 +681,34 @@
             void main() {
               vec3 pos = position;
               
-              // Add more dynamic movement
-              float speed = size * 5.0; // Increased speed factor
-              pos.x += sin(time * speed + pos.z * 10.0) * 0.015;
-              pos.y += cos(time * speed + pos.x * 10.0) * 0.015;
+              // Enhanced particle movement - more dynamic
+              float speedFactor = size * 5.0 + 2.0;
+              float amplitude = 0.02;
               
-              // Calculate alpha based on size and time
-              vAlpha = sin(time * 2.0 + size * 100.0) * 0.5 + 0.5;
+              // Different frequency for each axis
+              float xFreq = 1.0 + fract(position.y * 10.0) * 2.0;
+              float yFreq = 1.0 + fract(position.x * 10.0) * 2.0;
+              
+              // Circular motion component + wave
+              float angle = time * speedFactor * 0.2;
+              float radius = 0.01 * size * 5.0;
+              
+              // Add wave motion in x direction
+              pos.x += sin(time * xFreq + position.z * 15.0) * amplitude;
+              
+              // Add wave motion in y direction with different phase
+              pos.y += cos(time * yFreq + position.x * 15.0) * amplitude;
+              
+              // Add subtle circular motion
+              pos.x += cos(angle) * radius;
+              pos.y += sin(angle) * radius;
+              
+              // Pulsating alpha and size effect
+              vAlpha = 0.3 + 0.7 * (0.5 + 0.5 * sin(time * 2.0 + length(position) * 10.0));
               
               // Project position
               vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-              gl_PointSize = size * (300.0 / -mvPosition.z);
+              gl_PointSize = size * (300.0 / -mvPosition.z) * (0.8 + 0.2 * vAlpha);
               gl_Position = projectionMatrix * mvPosition;
             }
           `,
@@ -683,13 +717,16 @@
             varying float vAlpha;
             
             void main() {
-              // Create a circular particle
+              // Create a soft, glowing particle
               vec2 xy = gl_PointCoord.xy - 0.5;
               float radius = length(xy);
-              float alpha = smoothstep(0.5, 0.3, radius) * vAlpha;
               
-              // Output color
-              gl_FragColor = vec4(color, alpha);
+              // Softer edge falloff for more natural glow
+              float alpha = smoothstep(0.5, 0.1, radius) * vAlpha;
+              
+              // Output color with slight color variation based on alpha
+              vec3 finalColor = mix(color, vec3(1.0, 1.0, 1.0), vAlpha * 0.4);
+              gl_FragColor = vec4(finalColor, alpha);
             }
           `,
           transparent: true,
