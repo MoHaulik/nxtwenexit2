@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR Video Panels</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; background: #f0f2f5; }
+    #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; z-index: 9000; }
+    #start-button { padding: 15px 28px; font-size: 18px; background: rgba(255,255,255,0.9); color: black; border: none; border-radius: 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.1); cursor: pointer; transition: all 0.2s; font-weight: 600; }
+    #start-button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+    #status { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); color: black; padding: 12px 24px; border-radius: 16px; font-size: 16px; font-weight: 500; display: none; z-index: 9999; }
+    .exit-ar { position: fixed; top: 20px; right: 20px; background: white; color: black; border: none; border-radius: 50%; width: 46px; height: 46px; display: none; align-items: center; justify-content: center; font-size: 24px; cursor: pointer; z-index: 9999; }
+    .xr-active .exit-ar { display: flex; }
+    video { display: block; width: 1px; height: 1px; position: absolute; opacity: 0.01; }
+  </style>
+</head>
+<body>
+  <div id="overlay"><button id="start-button">Start Video Panels</button></div>
+  <button class="exit-ar" id="exit-ar">×</button>
+  <div id="status"></div>
+  
+  <!-- Video elements for content - removed 'muted' attribute to enable audio -->
+  <video id="video-1" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-2" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-3" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-4" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-5" loop playsinline crossorigin="anonymous"></video>
+  <!-- Added 5 more video elements -->
+  <video id="video-6" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-7" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-8" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-9" loop playsinline crossorigin="anonymous"></video>
+  <video id="video-10" loop playsinline crossorigin="anonymous"></video>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+
+    // Main variables
+    let camera, scene, renderer, controllers = [], xrSession = null, raycaster, tempMatrix, videoPanel;
+    
+    // Collision detection for controllers
+    let collisionSpheres = [];
+    let isColliding = false;
+    let collisionStartTime = 0;
+    let clapTransitionTriggered = false;
+    
+    // Simple tweening utility
+    class Tween {
+      constructor(object, property, startValue, endValue, duration, easing, onComplete) {
+        this.object = object;
+        this.property = property;
+        this.startValue = startValue;
+        this.endValue = endValue;
+        this.duration = duration;
+        this.startTime = null;
+        this.isActive = true;
+        this.easing = easing || Tween.easeOutCubic;
+        this.onComplete = onComplete;
+      }
+      
+      static easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+      }
+      
+      static easeOutElastic(t) {
+        const p = 0.3;
+        return Math.pow(2, -10 * t) * Math.sin((t - p / 4) * (2 * Math.PI) / p) + 1;
+      }
+      
+      static easeInExpo(t) {
+        return t === 0 ? 0 : Math.pow(2, 10 * t - 10);
+      }
+      
+      update(currentTime) {
+        if (!this.isActive) return true;
+        
+        if (this.startTime === null) {
+          this.startTime = currentTime;
+        }
+        
+        const elapsed = currentTime - this.startTime;
+        const progress = Math.min(elapsed / this.duration, 1);
+        const easedProgress = this.easing(progress);
+        
+        // Handle both direct properties and nested objects
+        if (typeof this.property === 'string') {
+          const value = this.startValue + (this.endValue - this.startValue) * easedProgress;
+          this.object[this.property] = value;
+        } else if (Array.isArray(this.property)) {
+          // For objects like position, scale
+          let target = this.object;
+          for (let i = 0; i < this.property.length - 1; i++) {
+            target = target[this.property[i]];
+          }
+          const lastProp = this.property[this.property.length - 1];
+          const value = this.startValue + (this.endValue - this.startValue) * easedProgress;
+          target[lastProp] = value;
+        }
+        
+        if (progress >= 1) {
+          this.isActive = false;
+          if (this.onComplete) this.onComplete();
+          return true;
+        }
+        
+        return false;
+      }
+    }
+    
+    // Tween manager
+    class TweenManager {
+      constructor() {
+        this.tweens = [];
+      }
+      
+      add(tween) {
+        this.tweens.push(tween);
+        return tween;
+      }
+      
+      update(currentTime) {
+        let i = this.tweens.length;
+        while(i--) {
+          if (this.tweens[i].update(currentTime)) {
+            this.tweens.splice(i, 1);
+          }
+        }
+      }
+      
+      clear() {
+        this.tweens = [];
+      }
+    }
+    
+    const tweenManager = new TweenManager();
+    
+    // Variable to track the current video for redirection
+    let currentVideoForRedirect = null;
+    
+    function init() {
+      // Scene setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      
+      // Renderer setup
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      document.body.appendChild(renderer.domElement);
+
+      // Basic lighting
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+      
+      // Interaction setup
+      raycaster = new THREE.Raycaster();
+      tempMatrix = new THREE.Matrix4();
+      videoPanel = new VideoPanelSystem();
+      
+      // Event listeners
+      window.addEventListener('resize', () => {
+        if (camera) {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+        }
+        if (renderer) renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+      
+      document.getElementById('start-button').addEventListener('click', startARSession);
+      document.getElementById('exit-ar').addEventListener('click', () => { if (xrSession) xrSession.end(); });
+    }
+
+    // Start AR session
+    function startARSession() {
+      if (!navigator.xr) {
+        updateStatus('WebXR not supported in this browser.');
+        return;
+      }
+      
+      // Unlock videos for autoplay (user gesture)
+      document.querySelectorAll('video').forEach(video => {
+        video.play().catch(() => {});
+        video.pause();
+        // Set initial low volume to avoid startling the user, will fade in during transitions
+        video.volume = 0.0;
+      });
+      
+      navigator.xr.isSessionSupported('immersive-ar')
+        .then(supported => {
+          if (supported) {
+            navigator.xr.requestSession('immersive-ar', { 
+              requiredFeatures: ['hit-test'],
+              optionalFeatures: ['hand-tracking'],
+            })
+            .then(onSessionStarted)
+            .catch(err => updateStatus('Failed to start AR: ' + err.message));
+          } else {
+            updateStatus('WebXR AR not supported on this device.');
+          }
+        });
+    }
+
+    // Handle AR session start
+    function onSessionStarted(session) {
+      xrSession = session;
+      document.getElementById('start-button').style.display = 'none';
+      document.body.classList.add('xr-active');
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      
+      // Reset clap transition state
+      clapTransitionTriggered = false;
+      isColliding = false;
+      collisionStartTime = 0;
+      
+      // Setup controllers
+      controllers = [0, 1].map(i => {
+        const controller = renderer.xr.getController(i);
+        controller.userData.id = i;
+        controller.userData.isSelecting = false;
+        
+        // Visual indicator (subtle hand indicator)
+        const handMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.01, 8, 8),
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.4
+          })
+        );
+        controller.add(handMesh);
+        
+        // Add invisible collision sphere for clap detection
+        const collisionSphere = new THREE.Mesh(
+          new THREE.SphereGeometry(0.08, 8, 8), // Larger invisible sphere for collision
+          new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            transparent: true,
+            opacity: 0.0 // Completely invisible
+          })
+        );
+        collisionSphere.userData.controllerId = i;
+        controller.add(collisionSphere);
+        collisionSpheres.push(collisionSphere);
+        
+        controller.addEventListener('selectstart', onControllerSelectStart);
+        controller.addEventListener('selectend', event => { event.target.userData.isSelecting = false; });
+        scene.add(controller);
+        return controller;
+      });
+      
+      // Initialize video panel and start
+      videoPanel.init(scene, camera);
+      setTimeout(() => videoPanel.startSequence(), 1000);
+      
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+      updateStatus('Video Panels ready! Tap anywhere on the panel to advance or clap your hands to exit.');
+    }
+    
+    function onSessionEnd() {
+      document.body.classList.remove('xr-active');
+      document.getElementById('start-button').style.display = 'block';
+      document.getElementById('status').style.display = 'none';
+      controllers = [];
+      collisionSpheres = [];
+      renderer.setAnimationLoop(null);
+      xrSession = null;
+      
+      // Reset clap state
+      clapTransitionTriggered = false;
+      isColliding = false;
+      
+      // Clean up tweens
+      tweenManager.clear();
+      
+      // Clean up scene
+      while(scene.children.length > 0) { 
+        const object = scene.children[0];
+        if (object.geometry) object.geometry.dispose();
+        if (object.material) {
+          if (Array.isArray(object.material)) {
+            object.material.forEach(m => m.dispose());
+          } else {
+            object.material.dispose();
+          }
+        }
+        scene.remove(object); 
+      }
+      
+      // Pause videos and mute audio
+      document.querySelectorAll('video').forEach(video => {
+        video.pause();
+        video.volume = 0;
+      });
+      
+      // Perform redirection if we have a current video link
+      if (currentVideoForRedirect) {
+        // Small delay before redirect to ensure everything is cleaned up
+        setTimeout(() => {
+          window.location.href = currentVideoForRedirect;
+        }, 200);
+      }
+    }
+    
+    function onControllerSelectStart(event) {
+      const controller = event.target;
+      controller.userData.isSelecting = true;
+      
+      // Raycasting for interaction
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+      
+      const interactiveObjects = videoPanel.getInteractiveObjects();
+      const intersects = raycaster.intersectObjects(interactiveObjects, true);
+      
+      if (intersects.length > 0) {
+        // Find interactive parent
+        let current = intersects[0].object;
+        while (current) {
+          if (current.userData && current.userData.onClick) {
+            current.userData.onClick();
+            break;
+          }
+          current = current.parent;
+        }
+      }
+    }
+    
+    // Check if two spheres are colliding
+    function spheresColliding(sphere1, sphere2) {
+      // Get world positions of both spheres
+      const pos1 = new THREE.Vector3();
+      const pos2 = new THREE.Vector3();
+      
+      sphere1.getWorldPosition(pos1);
+      sphere2.getWorldPosition(pos2);
+      
+      // Calculate distance between spheres
+      const distance = pos1.distanceTo(pos2);
+      
+      // Get the combined radius of both spheres (accounting for scale)
+      const radius1 = sphere1.geometry.parameters.radius * sphere1.parent.scale.x;
+      const radius2 = sphere2.geometry.parameters.radius * sphere2.parent.scale.x;
+      
+      // If distance is less than combined radius, spheres are colliding
+      return distance < (radius1 + radius2);
+    }
+    
+    function render(timestamp) {
+      // Update tweens
+      tweenManager.update(timestamp);
+      
+      // Update video panel
+      if (videoPanel) videoPanel.update(camera, timestamp);
+      
+      // Don't process collisions if transition already triggered
+      if (!clapTransitionTriggered && collisionSpheres.length >= 2) {
+        // Check for collision between controller spheres
+        const isCurrentlyColliding = spheresColliding(collisionSpheres[0], collisionSpheres[1]);
+        
+        if (isCurrentlyColliding && !isColliding) {
+          // Collision just started
+          isColliding = true;
+          collisionStartTime = timestamp;
+        } else if (isCurrentlyColliding && isColliding) {
+          // Check if collision has lasted for 500ms (half a second)
+          if (timestamp - collisionStartTime >= 500 && !clapTransitionTriggered) {
+            // Trigger clap transition after half a second of collision
+            clapTransitionTriggered = true;
+            updateStatus("Clap detected! Exiting...");
+            
+            // Get the current video link for redirection
+            if (videoPanel) {
+              // Store the redirection URL before exiting
+              currentVideoForRedirect = videoPanel.getCurrentVideoLink();
+            }
+            
+            // Play "clap to camera" transition animation
+            videoPanel.playClapExitAnimation(() => {
+              // End the session when animation completes
+              if (xrSession) {
+                setTimeout(() => {
+                  xrSession.end();
+                }, 100);
+              }
+            });
+          }
+        } else if (!isCurrentlyColliding && isColliding) {
+          // Collision ended
+          isColliding = false;
+        }
+      }
+      
+      // Check controller interaction
+      controllers.forEach(controller => {
+        if (controller.userData.isSelecting) {
+          tempMatrix.identity().extractRotation(controller.matrixWorld);
+          raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+          raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+          
+          const interactiveObjects = videoPanel.getInteractiveObjects();
+          const intersects = raycaster.intersectObjects(interactiveObjects, true);
+          
+          if (intersects.length > 0) {
+            // Simple visual feedback
+            const object = intersects[0].object;
+            if (object.material && !object.userData.isHovered) {
+              object.userData.isHovered = true;
+              if (object.scale.x === 1) {
+                object.scale.set(1.05, 1.05, 1.05);
+              }
+            }
+          }
+        }
+      });
+      
+      renderer.render(scene, camera);
+    }
+    
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.textContent = message;
+      statusElement.style.display = 'block';
+      
+      // Auto-hide after 3 seconds for non-error messages
+      if (!message.includes('error') && !message.includes('not supported')) {
+        setTimeout(() => { statusElement.style.display = 'none'; }, 3000);
+      }
+    }
+    
+    // Video Panel System
+    class VideoPanelSystem {
+      constructor() {
+        this.panel = null;
+        this.currentIndex = 0;
+        this.isActive = false;
+        this.panelGroup = null;
+        this.videoMaterials = {};
+        this.particles = null;
+        this.currentAudio = null;
+        
+        // Video to link mapping for redirection
+        this.videoLinks = [
+          { filename: 'video1.mp4', link: 'https://esc.art/' },
+          { filename: 'video2.mp4', link: 'https://brushworkvr.com/paint' },
+          { filename: 'video3.mp4', link: 'https://moonrider.xyz/' },
+          { filename: 'video4.mp4', link: 'https://aboveparadowski.com/' },
+          { filename: 'video5.mp4', link: 'https://meetwol.com/' },
+          { filename: 'video6.mp4', link: 'https://spatialfusion.io/' },
+          { filename: 'video7.mp4', link: 'https://elysian.fun/' },
+          { filename: 'video8.mp4', link: 'https://vhite-rabbit-xr.itch.io/mirror-mystery/' },
+          { filename: 'video9.mp4', link: 'https://plockle.com/play' },
+          { filename: 'video10.mp4', link: 'https://flowerbed.metademolab.com/' }
+        ];
+        
+        // Create a sequence of 10 video panels
+        this.sequence = [
+          { videoIndex: 1 },
+          { videoIndex: 2 },
+          { videoIndex: 3 },
+          { videoIndex: 4 },
+          { videoIndex: 5 },
+          { videoIndex: 6 },
+          { videoIndex: 7 },
+          { videoIndex: 8 },
+          { videoIndex: 9 },
+          { videoIndex: 10 }
+        ];
+        
+        // Preload video assets
+        this.loadAssets();
+      }
+      
+      // Get the link for the current video
+      getCurrentVideoLink() {
+        if (this.currentIndex >= 0 && this.currentIndex < this.sequence.length) {
+          const currentVideoIndex = this.sequence[this.currentIndex].videoIndex;
+          const videoLink = this.videoLinks.find(item => {
+            // Extract the number from the filename (video1.mp4 => 1)
+            const fileNumber = parseInt(item.filename.replace('video', '').replace('.mp4', ''));
+            return fileNumber === currentVideoIndex;
+          });
+          
+          if (videoLink) {
+            console.log(`Redirecting to: ${videoLink.link} for video ${currentVideoIndex}`);
+            return videoLink.link;
+          }
+        }
+        
+        return null; // No redirection if no matching video
+      }
+      
+      loadAssets() {
+        // Create video textures
+        const setupVideo = (index, url, elementId) => {
+          const video = document.getElementById(elementId);
+          
+          // Use the flat GitHub file structure
+          const videoUrl = url || `video${index}.mp4`;
+          video.src = videoUrl;
+          
+          const texture = new THREE.VideoTexture(video);
+          texture.minFilter = THREE.LinearFilter;
+          texture.magFilter = THREE.LinearFilter;
+          
+          this.videoMaterials[index] = {
+            video: video,
+            texture: texture,
+            material: new THREE.MeshBasicMaterial({
+              map: texture,
+              transparent: true,
+              side: THREE.DoubleSide
+            })
+          };
+        };
+        
+        // Setup all 10 videos from the GitHub flat file structure
+        setupVideo(1, 'video1.mp4', 'video-1');
+        setupVideo(2, 'video2.mp4', 'video-2');
+        setupVideo(3, 'video3.mp4', 'video-3');
+        setupVideo(4, 'video4.mp4', 'video-4');
+        setupVideo(5, 'video5.mp4', 'video-5');
+        setupVideo(6, 'video6.mp4', 'video-6');
+        setupVideo(7, 'video7.mp4', 'video-7');
+        setupVideo(8, 'video8.mp4', 'video-8');
+        setupVideo(9, 'video9.mp4', 'video-9');
+        setupVideo(10, 'video10.mp4', 'video-10');
+      }
+      
+      // Create placeholder animated "video" content using canvas (only used if videos aren't available)
+      createVideoPlaceholder(index) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512;
+        canvas.height = 512; // Square for simplicity
+        const ctx = canvas.getContext('2d');
+        
+        // Create a data URL for a "fake" video placeholder
+        const colors = ['#34C759', '#5AC8FA', '#AF52DE', '#FF3B30', '#FFCC00', '#007AFF', '#5856D6', '#FF9500', '#8E8E93', '#4CD964'];
+        const color = colors[(index - 1) % colors.length];
+        
+        // Draw something that looks like a video with animation
+        const drawFrame = () => {
+          ctx.fillStyle = color;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          // Draw a pattern
+          ctx.fillStyle = 'rgba(255,255,255,0.2)';
+          const time = Date.now() / 1000;
+          for (let i = 0; i < 10; i++) {
+            const x = Math.sin(time + i * 0.7) * canvas.width * 0.4 + canvas.width * 0.5;
+            const y = Math.cos(time + i * 0.7) * canvas.height * 0.4 + canvas.height * 0.5;
+            const size = 30 + Math.sin(time * 2 + i) * 15;
+            ctx.beginPath();
+            ctx.arc(x, y, size, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          
+          // Add a label showing which video this is
+          ctx.fillStyle = 'rgba(0,0,0,0.5)';
+          ctx.fillRect(canvas.width/2 - 50, canvas.height - 80, 100, 40);
+          
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 24px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('Video ' + index, canvas.width/2, canvas.height - 60);
+        };
+        
+        // Initial draw
+        drawFrame();
+        
+        return canvas.toDataURL();
+      }
+      
+      init(scene, camera) {
+        this.scene = scene;
+        this.camera = camera;
+        
+        // Create panel group
+        this.panelGroup = new THREE.Group();
+        this.panelGroup.position.set(0, 0, -0.6);
+        // Make initially invisible for animation
+        this.panelGroup.scale.set(0.5, 0.5, 0.5);
+        this.scene.add(this.panelGroup);
+        
+        this.createPanel();
+        
+        // Add new particle effect behind the panel
+        const particles = this.createParticleEffect();
+        this.panel.add(particles);
+      }
+      
+      // Enhanced particle effect with more particles and better edge visibility
+      createParticleEffect() {
+        // Create a particle system for shiny effect behind the panel
+        const particleCount = 200; // Increased from 100 to 200 particles
+        const particleGeometry = new THREE.BufferGeometry();
+        const particlePositions = new Float32Array(particleCount * 3);
+        const particleSizes = new Float32Array(particleCount);
+        
+        // Position particles with more emphasis on the edges
+        for (let i = 0; i < particleCount; i++) {
+          // Spread across panel width/height but positioned to favor the edges
+          const panelWidth = 0.7;
+          const panelHeight = 0.5;
+          const spread = 0.15; // Increased from 0.05 to 0.15 for better edge visibility
+          
+          let x, y;
+          
+          // Use a distribution that favors edges (40% chance of being at an edge)
+          if (Math.random() < 0.4) {
+            // Create particles at the edges
+            if (Math.random() < 0.5) {
+              // Horizontal edges (top/bottom)
+              x = (Math.random() - 0.5) * (panelWidth + spread);
+              y = (Math.random() < 0.5 ? -0.5 : 0.5) * (panelHeight + Math.random() * spread * 0.5);
+            } else {
+              // Vertical edges (left/right)
+              x = (Math.random() < 0.5 ? -0.5 : 0.5) * (panelWidth + Math.random() * spread * 0.5);
+              y = (Math.random() - 0.5) * (panelHeight + spread);
+            }
+          } else {
+            // Create particles distributed across the panel area
+            // Use a cubic function to push more particles toward the edges
+            const t = Math.random() * 2 - 1; // Range -1 to 1
+            const cubicValue = Math.pow(t, 3); // Cubic distribution
+            
+            x = cubicValue * 0.5 * (panelWidth + spread);
+            y = (Math.random() * 2 - 1) * 0.5 * (panelHeight + spread);
+            
+            // Randomly swap x and y in some cases for better distribution
+            if (Math.random() < 0.5) {
+              const temp = x;
+              x = y;
+              y = temp;
+            }
+          }
+          
+          particlePositions[i * 3] = x;
+          particlePositions[i * 3 + 1] = y;
+          particlePositions[i * 3 + 2] = -0.03 - Math.random() * 0.02; // Varied depth behind panel
+          
+          // Random sizes with larger variation
+          particleSizes[i] = Math.random() * 0.015 + 0.002;
+        }
+        
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+        particleGeometry.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+        
+        // Create shader material for particles
+        const particleMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            time: { value: 0 },
+            color: { value: new THREE.Color(0xffffff) }
+          },
+          vertexShader: `
+            attribute float size;
+            uniform float time;
+            varying float vAlpha;
+            
+            void main() {
+              vec3 pos = position;
+              
+              // Add more dynamic movement
+              float speed = size * 5.0; // Increased speed factor
+              pos.x += sin(time * speed + pos.z * 10.0) * 0.015;
+              pos.y += cos(time * speed + pos.x * 10.0) * 0.015;
+              
+              // Calculate alpha based on size and time
+              vAlpha = sin(time * 2.0 + size * 100.0) * 0.5 + 0.5;
+              
+              // Project position
+              vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+              gl_PointSize = size * (300.0 / -mvPosition.z);
+              gl_Position = projectionMatrix * mvPosition;
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 color;
+            varying float vAlpha;
+            
+            void main() {
+              // Create a circular particle
+              vec2 xy = gl_PointCoord.xy - 0.5;
+              float radius = length(xy);
+              float alpha = smoothstep(0.5, 0.3, radius) * vAlpha;
+              
+              // Output color
+              gl_FragColor = vec4(color, alpha);
+            }
+          `,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        
+        this.particles = new THREE.Points(particleGeometry, particleMaterial);
+        return this.particles;
+      }
+      
+      createPanel() {
+        // Create a panel for displaying videos
+        const panel = new THREE.Group();
+        const panelWidth = 0.7;
+        const panelHeight = 0.5;
+        
+        // Create rounded rectangle mask
+        const roundedRectMask = this.createRoundedRectMask();
+        
+        // Create glow mesh (positioned behind the video panel)
+        const glowMesh = this.createGlowEffect(panelWidth, panelHeight);
+        glowMesh.position.z = -0.003;
+        panel.add(glowMesh);
+        
+        // Main video plane with shader material for rounded corners
+        const videoGeometry = new THREE.PlaneGeometry(panelWidth, panelHeight);
+        
+        // Use ShaderMaterial for perfect rounded corners
+        const videoMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            videoTexture: { value: null },
+            cornerRadius: { value: 0.11 }, // Adjust corner radius (relative to dimensions)
+            dimensions: { value: new THREE.Vector2(panelWidth, panelHeight) }
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform sampler2D videoTexture;
+            uniform float cornerRadius;
+            uniform vec2 dimensions;
+            varying vec2 vUv;
+            
+            float roundedRectangle(vec2 position, vec2 dimensions, float radius) {
+              vec2 q = abs(position) - dimensions + vec2(radius);
+              return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+            }
+            
+            void main() {
+              // Convert UV from 0-1 range to -dimensions/2 to +dimensions/2
+              vec2 position = (vUv - 0.5) * dimensions;
+              
+              // Get distance to rounded rectangle border
+              float distToEdge = roundedRectangle(position, dimensions * 0.5, cornerRadius);
+              
+              // Create smooth mask
+              float mask = 1.0 - smoothstep(-0.01, 0.01, distToEdge);
+              
+              // Apply mask to video texture
+              vec4 videoColor = texture2D(videoTexture, vUv);
+              
+              if (mask < 0.01) discard;
+              gl_FragColor = videoColor * vec4(1.0, 1.0, 1.0, mask);
+            }
+          `,
+          transparent: true,
+          side: THREE.DoubleSide
+        });
+        
+        this.videoPlane = new THREE.Mesh(videoGeometry, videoMaterial);
+        
+        // Make the whole panel interactive
+        this.videoPlane.userData.onClick = () => {
+          this.showNextVideo();
+        };
+        
+        panel.add(this.videoPlane);
+        
+        this.panelGroup.add(panel);
+        this.panel = panel;
+        this.panel.visible = false;
+      }
+      
+      createRoundedRectMask() {
+        // Create rounded rectangle shape for mask
+        const shapeCanvas = document.createElement('canvas');
+        shapeCanvas.width = 512;
+        shapeCanvas.height = 512;
+        const shapeCtx = shapeCanvas.getContext('2d');
+        
+        // Draw rounded rectangle shape
+        const cornerRadius = 80; // Higher value for more rounded corners (iOS-like)
+        shapeCtx.beginPath();
+        shapeCtx.moveTo(cornerRadius, 0);
+        shapeCtx.lineTo(shapeCanvas.width - cornerRadius, 0);
+        shapeCtx.quadraticCurveTo(shapeCanvas.width, 0, shapeCanvas.width, cornerRadius);
+        shapeCtx.lineTo(shapeCanvas.width, shapeCanvas.height - cornerRadius);
+        shapeCtx.quadraticCurveTo(shapeCanvas.width, shapeCanvas.height, shapeCanvas.width - cornerRadius, shapeCanvas.height);
+        shapeCtx.lineTo(cornerRadius, shapeCanvas.height);
+        shapeCtx.quadraticCurveTo(0, shapeCanvas.height, 0, shapeCanvas.height - cornerRadius);
+        shapeCtx.lineTo(0, cornerRadius);
+        shapeCtx.quadraticCurveTo(0, 0, cornerRadius, 0);
+        shapeCtx.closePath();
+        
+        shapeCtx.fillStyle = 'white';
+        shapeCtx.fill();
+        
+        return new THREE.CanvasTexture(shapeCanvas);
+      }
+      
+      createGlowEffect(width, height) {
+        // Create a larger mesh for the glow
+        const glowGeometry = new THREE.PlaneGeometry(width * 1.1, height * 1.1);
+        
+        // Create a custom glow shader
+        const glowMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            glowColor: { value: new THREE.Color(0xffffff) },
+            glowIntensity: { value: 0.4 },
+            cornerRadius: { value: 0.15 }, // Adjust for more rounded corners
+            dimensions: { value: new THREE.Vector2(width * 1.1, height * 1.1) }
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 glowColor;
+            uniform float glowIntensity;
+            uniform float cornerRadius;
+            uniform vec2 dimensions;
+            varying vec2 vUv;
+            
+            float roundedRectangle(vec2 position, vec2 dimensions, float radius) {
+              vec2 q = abs(position) - dimensions + vec2(radius);
+              return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+            }
+            
+            void main() {
+              // Convert UV from 0-1 range to -dimensions/2 to +dimensions/2
+              vec2 position = (vUv - 0.5) * dimensions;
+              
+              // Get distance to rounded rectangle border
+              float distToEdge = roundedRectangle(position, dimensions * 0.5, cornerRadius);
+              
+              // Create a smooth glow that fades outward
+              float glow = 1.0 - smoothstep(-0.05, 0.05, distToEdge);
+              
+              // Additional outer glow
+              float outerGlow = 1.0 - smoothstep(-0.1, 0.05, distToEdge);
+              
+              // Combine for nice effect
+              glow = max(glow, outerGlow * 0.5);
+              
+              gl_FragColor = vec4(glowColor, glow * glowIntensity);
+            }
+          `,
+          transparent: true,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+        
+        return new THREE.Mesh(glowGeometry, glowMaterial);
+      }
+      
+      startSequence() {
+        this.isActive = true;
+        this.currentIndex = 0;
+        this.panel.visible = true;
+        
+        // Entrance animation
+        this.animateEntrance();
+        
+        this.showCurrentVideo();
+      }
+      
+      animateEntrance() {
+        // Reset transforms - ensure these are reset to the same values every time
+        this.panelGroup.scale.set(0.6, 0.6, 0.6);
+        this.panelGroup.position.set(0, 0.1, -0.8);
+        
+        // Reset materials opacity
+        this.panel.traverse(obj => {
+          if (obj.material && obj.material.opacity !== undefined) {
+            obj.material.opacity = 0;
+          } else if (obj.material && obj.material.uniforms && obj.material.uniforms.glowIntensity) {
+            obj.material.uniforms.glowIntensity.value = 0;
+          }
+        });
+        
+        // Animate scale to full size
+        tweenManager.add(new Tween(
+          this.panelGroup.scale, 
+          'x', 
+          0.6, 
+          1.0, 
+          600, 
+          Tween.easeOutCubic
+        ));
+        
+        tweenManager.add(new Tween(
+          this.panelGroup.scale, 
+          'y', 
+          0.6, 
+          1.0, 
+          600, 
+          Tween.easeOutCubic
+        ));
+        
+        // Animate position
+        tweenManager.add(new Tween(
+          this.panelGroup.position, 
+          'y', 
+          0.1, 
+          0, 
+          700, 
+          Tween.easeOutCubic
+        ));
+        
+        tweenManager.add(new Tween(
+          this.panelGroup.position, 
+          'z', 
+          -0.8, 
+          -0.6, 
+          700, 
+          Tween.easeOutCubic
+        ));
+        
+        // Fade in all materials
+        this.panel.traverse(obj => {
+          if (obj.material) {
+            if (obj.material.opacity !== undefined) {
+              const targetOpacity = 1.0;
+              
+              tweenManager.add(new Tween(
+                obj.material, 
+                'opacity', 
+                0, 
+                targetOpacity, 
+                800, 
+                Tween.easeOutCubic
+              ));
+            } 
+            // Handle glow shader material
+            else if (obj.material.uniforms && obj.material.uniforms.glowIntensity) {
+              const startValue = 0;
+              const endValue = 0.4;
+              
+              tweenManager.add({
+                object: obj.material.uniforms.glowIntensity,
+                property: 'value',
+                startValue: startValue,
+                endValue: endValue,
+                duration: 1000,
+                startTime: null,
+                isActive: true,
+                easing: Tween.easeOutCubic,
+                update: function(currentTime) {
+                  if (!this.isActive) return true;
+                  
+                  if (this.startTime === null) {
+                    this.startTime = currentTime;
+                  }
+                  
+                  const elapsed = currentTime - this.startTime;
+                  const progress = Math.min(elapsed / this.duration, 1);
+                  const easedProgress = this.easing(progress);
+                  
+                  this.object.value = this.startValue + (this.endValue - this.startValue) * easedProgress;
+                  
+                  if (progress >= 1) {
+                    this.isActive = false;
+                    if (this.onComplete) this.onComplete();
+                    return true;
+                  }
+                  
+                  return false;
+                }
+              });
+            }
+          }
+        });
+      }
+      
+      // Clap exit animation - fly panel to camera
+      playClapExitAnimation(onComplete) {
+        // Save current panel position and rotation
+        const startPosition = this.panelGroup.position.clone();
+        const startRotation = this.panelGroup.rotation.clone();
+        const startScale = this.panelGroup.scale.clone();
+        
+        // If we have current audio, start fading it out
+        if (this.currentAudio) {
+          this.fadeAudio(this.currentAudio, this.currentAudio.volume, 0, 200);
+        }
+        
+        // Prepare camera direction vector for final position
+        const cameraDirection = new THREE.Vector3(0, 0, -1);
+        cameraDirection.applyQuaternion(camera.quaternion);
+        const targetPosition = new THREE.Vector3().copy(camera.position);
+        
+        // Animate panel flying to the camera 
+        // First add some upward motion, then direct to camera
+        
+        // Step 1: Quick upward and slightly forward motion
+        tweenManager.add(new Tween(
+          this.panelGroup.position,
+          'y',
+          startPosition.y,
+          startPosition.y + 0.2,
+          300,
+          Tween.easeOutCubic,
+          () => {
+            // Step 2: Fly directly to camera (after upward motion)
+            tweenManager.add(new Tween(
+              this.panelGroup.position,
+              'x',
+              this.panelGroup.position.x,
+              targetPosition.x,
+              300,
+              Tween.easeInExpo
+            ));
+            
+            tweenManager.add(new Tween(
+              this.panelGroup.position,
+              'y',
+              this.panelGroup.position.y,
+              targetPosition.y,
+              300,
+              Tween.easeInExpo
+            ));
+            
+            tweenManager.add(new Tween(
+              this.panelGroup.position,
+              'z',
+              this.panelGroup.position.z,
+              targetPosition.z + 0.05, // Stop just before camera
+              300,
+              Tween.easeInExpo,
+              onComplete
+            ));
+            
+            // Scale up as it approaches camera
+            tweenManager.add(new Tween(
+              this.panelGroup.scale,
+              'x',
+              this.panelGroup.scale.x,
+              this.panelGroup.scale.x * 2,
+              300,
+              Tween.easeInExpo
+            ));
+            
+            tweenManager.add(new Tween(
+              this.panelGroup.scale,
+              'y',
+              this.panelGroup.scale.y,
+              this.panelGroup.scale.y * 2,
+              300,
+              Tween.easeInExpo
+            ));
+            
+            // Increase glow intensity as it flies to camera
+            this.panel.traverse(obj => {
+              if (obj.material && obj.material.uniforms && obj.material.uniforms.glowIntensity) {
+                const startGlowValue = obj.material.uniforms.glowIntensity.value;
+                const endGlowValue = 0.9; // Brighter glow
+                
+                tweenManager.add({
+                  object: obj.material.uniforms.glowIntensity,
+                  property: 'value',
+                  startValue: startGlowValue,
+                  endValue: endGlowValue,
+                  duration: 400,
+                  startTime: null,
+                  isActive: true,
+                  easing: Tween.easeInExpo,
+                  update: function(currentTime) {
+                    if (!this.isActive) return true;
+                    
+                    if (this.startTime === null) {
+                      this.startTime = currentTime;
+                    }
+                    
+                    const elapsed = currentTime - this.startTime;
+                    const progress = Math.min(elapsed / this.duration, 1);
+                    const easedProgress = this.easing(progress);
+                    
+                    this.object.value = this.startValue + (this.endValue - this.startValue) * easedProgress;
+                    
+                    if (progress >= 1) {
+                      this.isActive = false;
+                      return true;
+                    }
+                    
+                    return false;
+                  }
+                });
+              }
+            });
+          }
+        ));
+        
+        // Add some forward motion in initial step
+        tweenManager.add(new Tween(
+          this.panelGroup.position,
+          'z',
+          startPosition.z,
+          startPosition.z - 0.1,
+          300,
+          Tween.easeOutCubic
+        ));
+      }
+      
+      // Fade audio to manage smooth transitions
+      fadeAudio(video, fromVolume, toVolume, duration) {
+        const startTime = Date.now();
+        const fadeInterval = setInterval(() => {
+          const elapsed = Date.now() - startTime;
+          const progress = Math.min(elapsed / duration, 1);
+          
+          video.volume = fromVolume + (toVolume - fromVolume) * progress;
+          
+          if (progress >= 1) {
+            clearInterval(fadeInterval);
+            video.volume = toVolume;
+          }
+        }, 16); // ~60fps update
+        
+        return fadeInterval;
+      }
+      
+      animateExit(onComplete) {
+        // If we have current audio, start fading it out
+        if (this.currentAudio) {
+          this.fadeAudio(this.currentAudio, this.currentAudio.volume, 0, 400);
+        }
+        
+        // Scale down
+        tweenManager.add(new Tween(
+          this.panelGroup.scale, 
+          'x', 
+          this.panelGroup.scale.x, 
+          0.6, 
+          400, 
+          Tween.easeOutCubic
+        ));
+        
+        tweenManager.add(new Tween(
+          this.panelGroup.scale, 
+          'y', 
+          this.panelGroup.scale.y, 
+          0.6, 
+          400, 
+          Tween.easeOutCubic
+        ));
+        
+        // Move away - make sure we animate to a specific z position
+        tweenManager.add(new Tween(
+          this.panelGroup.position, 
+          'z', 
+          this.panelGroup.position.z, 
+          -0.9, 
+          500, 
+          Tween.easeOutCubic,
+          onComplete // Only call onComplete after the last animation finishes
+        ));
+        
+        // Fade out all materials
+        this.panel.traverse(obj => {
+          if (obj.material) {
+            if (obj.material.opacity !== undefined) {
+              tweenManager.add(new Tween(
+                obj.material, 
+                'opacity', 
+                obj.material.opacity, 
+                0, 
+                300, 
+                Tween.easeOutCubic
+              ));
+            } 
+            // Handle glow shader material
+            else if (obj.material.uniforms && obj.material.uniforms.glowIntensity) {
+              const startValue = obj.material.uniforms.glowIntensity.value;
+              const endValue = 0;
+              
+              tweenManager.add({
+                object: obj.material.uniforms.glowIntensity,
+                property: 'value',
+                startValue: startValue,
+                endValue: endValue,
+                duration: 300,
+                startTime: null,
+                isActive: true,
+                easing: Tween.easeOutCubic,
+                update: function(currentTime) {
+                  if (!this.isActive) return true;
+                  
+                  if (this.startTime === null) {
+                    this.startTime = currentTime;
+                  }
+                  
+                  const elapsed = currentTime - this.startTime;
+                  const progress = Math.min(elapsed / this.duration, 1);
+                  const easedProgress = this.easing(progress);
+                  
+                  this.object.value = this.startValue + (this.endValue - this.startValue) * easedProgress;
+                  
+                  if (progress >= 1) {
+                    this.isActive = false;
+                    return true;
+                  }
+                  
+                  return false;
+                }
+              });
+            }
+          }
+        });
+      }
+      
+      showCurrentVideo() {
+        if (this.currentIndex >= this.sequence.length) {
+          // Loop back to the beginning
+          this.currentIndex = 0;
+          updateStatus("Restarting video sequence...");
+        }
+        
+        const item = this.sequence[this.currentIndex];
+        
+        // Get video material for current index
+        if (item.videoIndex && this.videoMaterials[item.videoIndex]) {
+          // Get video texture
+          const videoTexture = this.videoMaterials[item.videoIndex].texture;
+          
+          // Apply video texture to shader uniform
+          if (this.videoPlane && this.videoPlane.material.uniforms) {
+            this.videoPlane.material.uniforms.videoTexture.value = videoTexture;
+          }
+          
+          // Pause all other videos and reset their volume
+          Object.entries(this.videoMaterials).forEach(([index, material]) => {
+            if (parseInt(index) !== item.videoIndex && material.video) {
+              material.video.pause();
+              material.video.volume = 0;
+            }
+          });
+          
+          // Play the current video with audio fade-in
+          const video = this.videoMaterials[item.videoIndex].video;
+          video.volume = 0; // Start muted and fade in
+          
+          // Set the current audio reference for future transitions
+          this.currentAudio = video;
+          
+          // Play the video and fade in the audio
+          video.play().then(() => {
+            this.fadeAudio(video, 0, 0.8, 500); // Fade in to 80% volume over 500ms
+          }).catch(err => {
+            console.error("Error playing video:", err);
+            // Try again with user interaction
+            updateStatus("Tap again to enable audio");
+          });
+        }
+      }
+      
+      showNextVideo() {
+        // Animate transition to next video
+        this.animateExit(() => {
+          this.currentIndex++;
+          this.showCurrentVideo();
+          this.animateEntrance();
+        });
+      }
+      
+      update(camera, timestamp) {
+        if (!this.isActive || !this.panelGroup || !camera) return;
+        
+        // Position panel in front of camera
+        const cameraDirection = new THREE.Vector3(0, 0, -1);
+        cameraDirection.applyQuaternion(camera.quaternion);
+        cameraDirection.multiplyScalar(0.8); // Distance from camera
+        
+        const targetPosition = new THREE.Vector3().copy(camera.position).add(cameraDirection);
+        // Faster position interpolation for Quest
+        this.panelGroup.position.lerp(targetPosition, 0.25);
+        
+        // Always face the camera
+        this.panelGroup.lookAt(camera.position);
+        
+        // Update video texture when visible
+        if (this.sequence[this.currentIndex] && 
+            this.sequence[this.currentIndex].videoIndex) {
+          const videoIndex = this.sequence[this.currentIndex].videoIndex;
+          if (this.videoMaterials[videoIndex] && this.videoMaterials[videoIndex].texture) {
+            this.videoMaterials[videoIndex].texture.needsUpdate = true;
+          }
+        }
+        
+        // Update particle effect animation
+        if (this.particles && this.particles.material.uniforms) {
+          this.particles.material.uniforms.time.value = timestamp * 0.001; // Convert to seconds
+        }
+      }
+      
+      getInteractiveObjects() {
+        // Return all objects that can be interacted with
+        return this.panel ? [this.videoPlane] : [];
+      }
+    }
+    
+    // Initialize everything
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
